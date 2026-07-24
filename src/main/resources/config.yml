@@ -48,10 +48,12 @@ flow:
   puddle-max-units: 1
 
 # ---- Evaporation ------------------------------------------
-# Each pass the engine makes over a water block acts as a "random tick": a
-# shallow block at the edge of a body has a chance to lose one unit, so
+# A random-tick pass (mirroring vanilla's randomTickSpeed) samples blocks in
+# the 3x3 loaded chunks around each online player every tick. A sampled
+# shallow water block at the edge of a body has a chance to lose one unit, so
 # puddles slowly dry up while the interior of a body (fully surrounded by
-# water) is left alone. Water only — lava never evaporates. Off by default.
+# water) and ocean sources are left alone. Water only — lava never
+# evaporates. Off by default.
 evaporation:
   # Enable evaporation.
   enabled: false

@@ -280,19 +280,6 @@ public final class FlowEngine extends BukkitRunnable {
 			}
 		}
 
-		// Evaporation: this pass through the engine is our "random tick" for
-		// the block. A shallow water block (<= min units) with too few water
-		// neighbours on the X/Z axis (< min neighbours) has `chance` of losing
-		// one unit — puddles at the edge of a body slowly dry up. Water only.
-		int evapNbrs = -1;
-		if (evaporationEnabled && curIsWater && u > 0 && u <= evaporationMinUnits) {
-			evapNbrs = horizontalWaterNeighbors(world, x, y, z);
-			if (evapNbrs < evaporationMinNeighbors
-					&& ThreadLocalRandom.current().nextFloat() < evaporationChance) {
-				u--;
-			}
-		}
-
 		// Evaporate a stranded thin film: a small flowing block that cannot
 		// move anywhere (no fuller neighbour to merge from, no adjacent drop,
 		// no reachable drain) would otherwise hang forever as a puddle.
@@ -303,13 +290,6 @@ public final class FlowEngine extends BukkitRunnable {
 		// Write back our remaining units.
 		place(world, x, y, z, u);
 
-		// Keep evaporation candidates in the tick loop so standing puddles keep
-		// getting checked (like vanilla random ticks keep revisiting a block)
-		// and eventually dry up, instead of settling after a single check.
-		if (u > 0 && evapNbrs >= 0 && evapNbrs < evaporationMinNeighbors) {
-			queue.enqueue(world, x, y, z);
-		}
-
 		// Wake the block above so it can fall into any space we just freed.
 		if (u != u0) {
 			int upY = y + 1;
@@ -317,6 +297,40 @@ public final class FlowEngine extends BukkitRunnable {
 				queue.enqueue(world, x, upY, z);
 			}
 		}
+	}
+
+	/**
+	 * Random-tick evaporation for a single water cell, driven by
+	 * {@link ru.deelter.waterphysics.engine.EvaporationTicker} (not the flow
+	 * queue), so it reaches static, settled water the flow engine never
+	 * re-processes — not just actively flowing cells.
+	 * <p>
+	 * Applies the configured conditions and, on a successful roll, removes one
+	 * unit through the normal conserving path ({@link #place}) so the cache,
+	 * waterlogging and neighbour wake-ups stay consistent. No-op unless the
+	 * cell really is finite water at most {@code minimum-units} deep with fewer
+	 * than {@code minimum-neighbors} horizontal water neighbours. Must be
+	 * called on the thread/region that owns the cell (the ticker uses the
+	 * region scheduler to guarantee this).
+	 */
+	public void randomTickEvaporate(World world, int x, int y, int z) {
+		if (!evaporationEnabled) return;
+		if (!world.isChunkLoaded(x >> 4, z >> 4)) return;
+		if (!config.isWorldEnabled(world.getName())) return;
+
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+
+		if (getType(world, x, y, z) != TYPE_WATER) return;
+		if (isInfiniteSource(world, x, y, z)) return; // oceans never evaporate
+
+		int u = unitsAt(world, x, y, z);
+		if (u <= 0 || u > evaporationMinUnits) return;
+		if (horizontalWaterNeighbors(world, x, y, z) >= evaporationMinNeighbors) return;
+		if (ThreadLocalRandom.current().nextFloat() >= evaporationChance) return;
+
+		place(world, x, y, z, u - 1);
 	}
 
 	/** Whether (x,y,z) lies in an excluded biome, via the per-4x4x4-section cache. */
