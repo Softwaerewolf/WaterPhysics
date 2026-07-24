@@ -130,12 +130,12 @@ public final class FluidContainerListener implements Listener {
 	 */
 	@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
 	public void onBucketFill(PlayerBucketFillEvent event) {
-		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) event.setCancelled(true);
+		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) deny(event); // event.setCancelled(true);
 	}
 
 	@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
 	public void onBucketEmpty(PlayerBucketEmptyEvent event) {
-		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) event.setCancelled(true);
+		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) deny(event); // event.setCancelled(true);
 	}
 
 	@EventHandler
