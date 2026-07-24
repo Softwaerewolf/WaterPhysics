@@ -1,5 +1,7 @@
 # WaterPhysics
 
+[![Build](https://github.com/Softwaerewolf/WaterPhysics/actions/workflows/build.yml/badge.svg)](https://github.com/Softwaerewolf/WaterPhysics/actions/workflows/build.yml)
+
 High-performance realistic water physics plugin for Paper 1.21+.
 
 Water behaves like a finite, mass-conserving fluid: what you pour in is what
