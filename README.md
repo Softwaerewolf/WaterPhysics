@@ -204,7 +204,7 @@ optimization:
   cache-max-size: 100000                   # Max cached block states (LRU).
   chunk-rescan-on-load: true               # Re-queue water on chunk load.
   chunk-scan-max-blocks: 2000              # Max water blocks re-queued per rescan.
-  excluded-biomes:                         # Biomes where water is an infinite source.
+  excluded-biomes:                         # Biomes where full water acts as an infinite source.
     - ocean
     - deep_ocean
     - river

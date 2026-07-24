@@ -42,10 +42,16 @@ import static ru.deelter.waterphysics.cache.BlockStateCache.*;
  * </ol>
  * Re-queueing of touched cells lets the body converge over successive ticks.
  * <p>
- * Water inside an excluded biome (oceans, rivers, …) is not simulated with the
- * finite model — it acts as an <b>infinite source</b> that tops up the cell
- * below and its horizontal neighbours whenever they hold air or partially
- * filled water, without ever draining itself.
+ * FULL water blocks (level 0) inside an excluded biome (oceans, rivers, …)
+ * are <b>infinite sources</b>: instead of the finite model they top up the
+ * cell below and their horizontal neighbours whenever those hold air, a
+ * plant, or partially filled water — never draining themselves — while
+ * keeping water's usual block interactions (washing away torches/plants,
+ * waterlogging, solidifying lava). Partially filled water in an excluded
+ * biome is NOT infinite and is simulated with the normal finite model; if it
+ * would flow down into an infinite source it dissipates into it. Infinite
+ * sources are never cached: their state is read fresh from the world and any
+ * cache entry is dropped.
  */
 public final class FlowEngine extends BukkitRunnable {
 
@@ -162,12 +168,10 @@ public final class FlowEngine extends BukkitRunnable {
 		if (!config.isWorldEnabled(world.getName())) return;
 		if (playerProximityCheck
 				&& !proximity.isActive(world.getUID(), x, z)) return;
-		if (biomeExclusionEnabled) {
-			long bk = BlockKey.of(x >> 2, y >> 2, z >> 2);
-			if (biomeExcludedCache.computeIfAbsent(bk, k -> config.isBiomeExcluded(world.getBiome(x, y, z)))) {
-				processInfiniteSource(world, x, y, z);
-				return;
-			}
+		if (isExcludedBiome(world, x, y, z)) {
+			if (processInfiniteSource(world, x, y, z)) return;
+			// Partial water in an excluded biome is not an infinite source —
+			// fall through and simulate it with the normal finite model.
 		}
 		// Pick the fluid for this block: water always, lava only if enabled.
 		byte selfType = getType(world, x, y, z);
@@ -191,6 +195,14 @@ public final class FlowEngine extends BukkitRunnable {
 		int minY = minY(world);
 		int downY = y - 1;
 		if (downY >= minY) {
+			// Partial water flowing down into an infinite source dissipates
+			// into it — the ocean absorbs it instead of stranding films on
+			// its surface. (Deliberately non-conserving, like evaporation:
+			// infinite sources sit outside the finite model anyway.)
+			if (curIsWater && u < 8 && isInfiniteSource(world, x, downY, z)) {
+				setAir(world, x, y, z);
+				return;
+			}
 			byte dt = getType(world, x, downY, z);
 			boolean canFall = dt == TYPE_AIR || dt == TYPE_PLANT
 					|| (dt == curType && unitsAt(world, x, downY, z) < 8);
@@ -272,35 +284,113 @@ public final class FlowEngine extends BukkitRunnable {
 		}
 	}
 
+	/** Whether (x,y,z) lies in an excluded biome, via the per-4x4x4-section cache. */
+	private boolean isExcludedBiome(World world, int x, int y, int z) {
+		if (!biomeExclusionEnabled) return false;
+		long bk = BlockKey.of(x >> 2, y >> 2, z >> 2);
+		return biomeExcludedCache.computeIfAbsent(bk, k -> config.isBiomeExcluded(world.getBiome(x, y, z)));
+	}
+
 	/**
-	 * Water inside an excluded biome (oceans, rivers, …) is not simulated with
-	 * the finite model — it acts as an INFINITE source: each processing pass
-	 * tops up the cell below and the four horizontal neighbours to full
-	 * whenever they hold air or partially filled water, without ever draining
-	 * itself. Digging into an ocean therefore floods the hole and the ocean
-	 * never empties; refilled cells outside the biome become ordinary finite
-	 * water. Plants (kelp, seagrass, …) are left untouched — only air and
-	 * partial water are filled.
+	 * True if (x,y,z) is an infinite source: FULL water (level 0) inside an
+	 * excluded biome. Read straight from the world — infinite sources are
+	 * never cached.
 	 */
-	private void processInfiniteSource(World world, int x, int y, int z) {
-		if (getType(world, x, y, z) != TYPE_WATER) return;
+	private boolean isInfiniteSource(World world, int x, int y, int z) {
+		if (!isExcludedBiome(world, x, y, z)) return false;
+		Block block = world.getBlockAt(x, y, z);
+		return block.getType() == Material.WATER
+				&& block.getBlockData() instanceof Levelled ld
+				&& ld.getLevel() == 0;
+	}
+
+	/**
+	 * Handle a block in an excluded biome (oceans, rivers, …). FULL water
+	 * there (level 0) is an INFINITE source: each processing pass tops up the
+	 * cell below and the four horizontal neighbours to full sources whenever
+	 * they are in direct contact and hold air, a plant, or partially filled
+	 * water — never draining itself — with water's usual interactions intact
+	 * (washing away torches/plants, waterlogging solid neighbours, solidifying
+	 * lava). Digging into an ocean therefore floods the hole and the ocean
+	 * never empties.
+	 * <p>
+	 * Infinite sources are never cached: the engine does not simulate them, so
+	 * a cached state would go stale. The block is read fresh from the world
+	 * and any existing cache entry is dropped.
+	 *
+	 * @return {@code true} if fully handled here; {@code false} if the block
+	 *         is partially filled water, which is not an infinite source and
+	 *         must be simulated finitely by the caller.
+	 */
+	private boolean processInfiniteSource(World world, int x, int y, int z) {
+		cache.invalidate(world.getUID(), BlockKey.of(x, y, z));
+
+		Block block = world.getBlockAt(x, y, z);
+		if (block.getType() != Material.WATER) return true; // non-water: untouched, as before
+		if (!(block.getBlockData() instanceof Levelled ld) || ld.getLevel() != 0) {
+			return false; // partial water is not infinite → finite physics
+		}
+
 		curType = TYPE_WATER;
 		curMat = Material.WATER;
 		curIsWater = true;
 
 		if (y - 1 >= minY(world)) {
-			fillIfPartial(world, x, y - 1, z);
+			infiniteFill(world, x, y - 1, z);
 		}
 		for (int i = 0; i < 4; i++) {
-			fillIfPartial(world, x + DX[i], y, z + DZ[i]);
+			infiniteFill(world, x + DX[i], y, z + DZ[i]);
 		}
+		return true;
 	}
 
-	/** Top up one cell to a full source if it holds air or partial water. */
-	private void fillIfPartial(World world, int x, int y, int z) {
-		byte t = getType(world, x, y, z);
-		if (t == TYPE_AIR || (t == TYPE_WATER && unitsAt(world, x, y, z) < 8)) {
-			place(world, x, y, z, 8);
+	/**
+	 * Apply an infinite source to one adjacent cell. The cell is read straight
+	 * from the world — never the cache — then gets the same treatment finite
+	 * water gives its neighbours: lava solidifies, plants (torches, grass,
+	 * kelp, …) are washed away, air and partial water fill up to a full
+	 * source, and solid waterloggables get waterlogged. The fresh state is
+	 * seeded into the cache first so the shared mutation helpers act on
+	 * reality, and a cell filled inside an excluded biome — now an infinite
+	 * source itself — has its cache entry dropped right after writing.
+	 */
+	private void infiniteFill(World world, int x, int y, int z) {
+		if (y < minY(world) || y > maxY(world)) return;
+
+		Block block = world.getBlockAt(x, y, z);
+		byte t = computeType(block);
+		UUID wid = world.getUID();
+		long key = BlockKey.of(x, y, z);
+
+		if (t == TYPE_LAVA) {
+			if (convertLava) {
+				boolean isSource = block.getBlockData() instanceof Levelled ld && ld.getLevel() == 0;
+				Material result = (isSource && convertLavaSource) ? Material.OBSIDIAN : Material.COBBLESTONE;
+				setSolid(world, x, y, z, result);
+			}
+			return;
+		}
+
+		if (t == TYPE_OTHER || t == TYPE_WATERLOGGED) {
+			if (waterlogEnabled) {
+				cache.putType(wid, key, t);
+				updateWaterlog(world, x, y, z, 0); // a full source sits beside it
+			}
+			return;
+		}
+
+		if (t == TYPE_WATER) {
+			int lvl = block.getBlockData() instanceof Levelled ld ? ld.getLevel() : 0;
+			if (lvl == 0) return; // already a full source
+			cache.putType(wid, key, TYPE_WATER);
+			cache.putLevel(wid, key, (byte) lvl);
+		} else { // TYPE_AIR or TYPE_PLANT
+			cache.putType(wid, key, t);
+		}
+		place(world, x, y, z, 8);
+
+		if (isExcludedBiome(world, x, y, z)) {
+			cache.invalidate(wid, key);
 		}
 	}
 

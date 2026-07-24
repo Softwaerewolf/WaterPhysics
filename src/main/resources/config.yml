@@ -74,10 +74,14 @@ optimization:
   # Prevents queue explosion if an ocean chunk loads with thousands of sources.
   chunk-scan-max-blocks: 2000
 
-  # Biomes where water is treated as an INFINITE source instead of being
-  # simulated: water there never drains, and tops up neighbouring air or
-  # partially filled water tiles to full when disturbed. Digging into an
-  # ocean floods the hole; the ocean itself never empties.
+  # Biomes where FULL water blocks (sources, level 0) act as INFINITE sources
+  # instead of being simulated: they never drain, and when disturbed they top
+  # up adjacent air, plants, or partially filled water to full sources —
+  # keeping water's usual interactions (washing away torches/plants,
+  # waterlogging, solidifying lava). Digging into an ocean floods the hole;
+  # the ocean itself never empties. Partially filled water in these biomes is
+  # NOT infinite — it flows with the normal finite physics, and dissipates
+  # when it would flow down into an infinite source.
   # Use lowercase biome keys (e.g. "ocean", "deep_ocean"). Empty list = all biomes finite.
   excluded-biomes:
     - ocean
