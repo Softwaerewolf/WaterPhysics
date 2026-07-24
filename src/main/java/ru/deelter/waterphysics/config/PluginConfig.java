@@ -74,6 +74,7 @@ public final class PluginConfig {
 	private final boolean effectsEnabled;
 	private final int effectsRateLimitTicks;
 	private final int effectsCount;
+	private final boolean effectsFallingWaterEnabled;
 
 	public PluginConfig(FileConfiguration cfg) {
 		this.enabled = cfg.getBoolean("enabled", true);
@@ -127,6 +128,7 @@ public final class PluginConfig {
 		this.effectsEnabled = cfg.getBoolean("effects.enabled", true);
 		this.effectsRateLimitTicks = Math.max(1, cfg.getInt("effects.rate-limit-ticks", 4));
 		this.effectsCount = Math.clamp(cfg.getInt("effects.count", 6), 1, 50);
+		this.effectsFallingWaterEnabled = cfg.getBoolean("effects.falling-water-enabled", true);
 	}
 
 	public boolean isWorldEnabled(String worldName) {

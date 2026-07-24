@@ -90,6 +90,7 @@ public final class FlowEngine extends BukkitRunnable {
 	private final boolean effectsEnabled;
 	private final int effectsRateLimitTicks;
 	private final int effectsCount;
+	private final boolean effectsFallingWaterEnabled;
 
 	// Biome exclusion cache: keyed by 4x4x4 section position, value = is excluded.
 	// Biomes never change at runtime → safe to cache forever.
@@ -99,6 +100,8 @@ public final class FlowEngine extends BukkitRunnable {
 	private final Map<Long, Integer> lastSoundTick = new HashMap<>();
 	// Particle rate-limit: chunk key → last soundTick when effect played.
 	private final Map<Long, Integer> lastEffectTick = new HashMap<>();
+	// Fall-particle rate-limit: chunk key → last soundTick when a fall effect played.
+	private final Map<Long, Integer> lastFallEffectTick = new HashMap<>();
 	private int soundTick;
 
 	// Reused BFS scratch for findFlowDir — avoids per-call allocation.
@@ -139,6 +142,7 @@ public final class FlowEngine extends BukkitRunnable {
 		this.effectsEnabled = config.isEffectsEnabled();
 		this.effectsRateLimitTicks = config.getEffectsRateLimitTicks();
 		this.effectsCount = config.getEffectsCount();
+		this.effectsFallingWaterEnabled = config.isEffectsFallingWaterEnabled();
 	}
 
 	@Override
@@ -546,7 +550,12 @@ public final class FlowEngine extends BukkitRunnable {
 				remaining -= add;
 			}
 		}
-		return units - remaining;
+
+		int placed = units - remaining;
+		if (placed > 0 && y - floor > 1) {
+			tryPlayFallEffect(world, x, y, floor, z);
+		}
+		return placed;
 	}
 
 	/**
@@ -845,6 +854,32 @@ public final class FlowEngine extends BukkitRunnable {
 				new Location(world, x + 0.5, y + 0.5, z + 0.5),
 				effectsCount,
 				0.3, 0.3, 0.3,
+				0.0);
+	}
+
+	/**
+	 * Spawn falling_water particles along a column that water just snapped
+	 * down (fall distance &gt; 1 block) — the engine moves falling water to
+	 * the bottom in a single step, so this visualises the drop the player
+	 * never saw. One burst spread vertically over the fallen column; only
+	 * near players, rate-limited per chunk like the other effects.
+	 */
+	private void tryPlayFallEffect(World world, int x, int topY, int floorY, int z) {
+		if (!effectsFallingWaterEnabled || !curIsWater) return;
+		if (playerProximityCheck && !proximity.isActive(world.getUID(), x, z)) return;
+
+		long ck = ((long) (x >> 4) << 32) | ((z >> 4) & 0xFFFFFFFFL);
+		int last = lastFallEffectTick.getOrDefault(ck, -effectsRateLimitTicks - 1);
+		if (soundTick - last < effectsRateLimitTicks) return;
+		lastFallEffectTick.put(ck, soundTick);
+
+		int dist = topY - floorY;
+		int count = Math.min(effectsCount * dist, effectsCount * 8);
+		world.spawnParticle(
+				Particle.FALLING_WATER,
+				new Location(world, x + 0.5, (topY + floorY) / 2.0 + 0.5, z + 0.5),
+				count,
+				0.25, dist / 2.0, 0.25,
 				0.0);
 	}
 

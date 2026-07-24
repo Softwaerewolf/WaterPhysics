@@ -171,3 +171,9 @@ effects:
 
   # Particles per burst.
   count: 6
+
+  # Spawn falling_water particles along the drop whenever water snaps down
+  # more than 1 block (the engine moves falling water to the bottom of a
+  # column in a single step — this visualises the fall). Only plays near
+  # players and shares the rate limit above.
+  falling-water-enabled: true
