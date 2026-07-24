@@ -39,6 +39,12 @@ public final class PluginConfig {
 	private final boolean removePuddles;
 	private final int removePuddleMaxUnits;
 
+	// Evaporation (random-tick chance for shallow, edge water to lose a unit)
+	private final boolean evaporationEnabled;
+	private final int evaporationMinUnits;
+	private final int evaporationMinNeighbors;
+	private final float evaporationChance;
+
 	// Optimization
 	private final boolean playerProximityCheck;
 	private final int playerProximityChunks;
@@ -99,6 +105,11 @@ public final class PluginConfig {
 
 		this.removePuddles = cfg.getBoolean("flow.remove-puddles", true);
 		this.removePuddleMaxUnits = Math.max(1, Math.min(7, cfg.getInt("flow.puddle-max-units", 1)));
+
+		this.evaporationEnabled = cfg.getBoolean("evaporation.enabled", false);
+		this.evaporationMinUnits = Math.clamp(cfg.getInt("evaporation.minimum-units", 1), 1, 8);
+		this.evaporationMinNeighbors = Math.clamp(cfg.getInt("evaporation.minimum-neighbors", 2), 1, 4);
+		this.evaporationChance = (float) Math.clamp(cfg.getDouble("evaporation.chance", 0.05), 0.0, 1.0);
 
 		this.playerProximityCheck = cfg.getBoolean("optimization.player-proximity-check", true);
 		this.playerProximityChunks = Math.max(1, cfg.getInt("optimization.player-proximity-chunks", 4));

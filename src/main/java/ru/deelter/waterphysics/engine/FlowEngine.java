@@ -12,6 +12,7 @@ import ru.deelter.waterphysics.config.PluginConfig;
 import ru.deelter.waterphysics.util.BlockKey;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static ru.deelter.waterphysics.cache.BlockStateCache.*;
 
@@ -83,6 +84,10 @@ public final class FlowEngine extends BukkitRunnable {
 	private final boolean biomeExclusionEnabled;
 	private final boolean removePuddles;
 	private final int removePuddleMaxUnits;
+	private final boolean evaporationEnabled;
+	private final int evaporationMinUnits;
+	private final int evaporationMinNeighbors;
+	private final float evaporationChance;
 	private final boolean soundsEnabled;
 	private final int soundRateLimitTicks;
 	private final float soundVolume;
@@ -135,6 +140,10 @@ public final class FlowEngine extends BukkitRunnable {
 		this.biomeExclusionEnabled = !config.getExcludedBiomes().isEmpty();
 		this.removePuddles = config.isRemovePuddles();
 		this.removePuddleMaxUnits = config.getRemovePuddleMaxUnits();
+		this.evaporationEnabled = config.isEvaporationEnabled();
+		this.evaporationMinUnits = config.getEvaporationMinUnits();
+		this.evaporationMinNeighbors = config.getEvaporationMinNeighbors();
+		this.evaporationChance = config.getEvaporationChance();
 		this.soundsEnabled = config.isSoundsEnabled();
 		this.soundRateLimitTicks = config.getSoundRateLimitTicks();
 		this.soundVolume = config.getSoundVolume();
@@ -271,6 +280,19 @@ public final class FlowEngine extends BukkitRunnable {
 			}
 		}
 
+		// Evaporation: this pass through the engine is our "random tick" for
+		// the block. A shallow water block (<= min units) with too few water
+		// neighbours on the X/Z axis (< min neighbours) has `chance` of losing
+		// one unit — puddles at the edge of a body slowly dry up. Water only.
+		int evapNbrs = -1;
+		if (evaporationEnabled && curIsWater && u > 0 && u <= evaporationMinUnits) {
+			evapNbrs = horizontalWaterNeighbors(world, x, y, z);
+			if (evapNbrs < evaporationMinNeighbors
+					&& ThreadLocalRandom.current().nextFloat() < evaporationChance) {
+				u--;
+			}
+		}
+
 		// Evaporate a stranded thin film: a small flowing block that cannot
 		// move anywhere (no fuller neighbour to merge from, no adjacent drop,
 		// no reachable drain) would otherwise hang forever as a puddle.
@@ -280,6 +302,13 @@ public final class FlowEngine extends BukkitRunnable {
 
 		// Write back our remaining units.
 		place(world, x, y, z, u);
+
+		// Keep evaporation candidates in the tick loop so standing puddles keep
+		// getting checked (like vanilla random ticks keep revisiting a block)
+		// and eventually dry up, instead of settling after a single check.
+		if (u > 0 && evapNbrs >= 0 && evapNbrs < evaporationMinNeighbors) {
+			queue.enqueue(world, x, y, z);
+		}
 
 		// Wake the block above so it can fall into any space we just freed.
 		if (u != u0) {
@@ -497,6 +526,19 @@ public final class FlowEngine extends BukkitRunnable {
 			}
 		}
 		return findFlowDir(world, x, y, z, u) < 0; // no far drain or equalize target either
+	}
+
+	/**
+	 * Count the four horizontal (X/Z axis) neighbours that are water, of any
+	 * level. Used by the evaporation check to tell edge/isolated water apart
+	 * from water in the interior of a body.
+	 */
+	private int horizontalWaterNeighbors(World world, int x, int y, int z) {
+		int n = 0;
+		for (int i = 0; i < 4; i++) {
+			if (getType(world, x + DX[i], y, z + DZ[i]) == TYPE_WATER) n++;
+		}
+		return n;
 	}
 
 	/**
