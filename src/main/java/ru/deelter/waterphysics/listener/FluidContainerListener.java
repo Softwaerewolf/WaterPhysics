@@ -18,6 +18,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
@@ -69,6 +71,9 @@ public final class FluidContainerListener implements Listener {
 
 	// player -> server tick of their last handled container action.
 	private final Map<UUID, Integer> lastActionTick = new HashMap<>();
+	// player -> server tick on which we last denied their interact (to also
+	// cancel the separate vanilla bucket fill/empty event that same tick).
+	private final Map<UUID, Integer> deniedTick = new HashMap<>();
 
 	public FluidContainerListener(PluginConfig config, WaterPhysics plugin) {
 		this.config = config;
@@ -116,9 +121,32 @@ public final class FluidContainerListener implements Listener {
 		if (acted) lastActionTick.put(player.getUniqueId(), tick);
 	}
 
+	/**
+	 * Cancel the vanilla bucket fill/empty events, which fire SEPARATELY from
+	 * PlayerInteractEvent (and only for source-level ops — hence bugs only at
+	 * the 8-unit boundary). When our interact handler took over the click this
+	 * tick, we must also cancel these so vanilla doesn't remove/place a full
+	 * source alongside our finite handling.
+	 */
+	@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+	public void onBucketFill(PlayerBucketFillEvent event) {
+		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) event.setCancelled(true);
+	}
+
+	@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+	public void onBucketEmpty(PlayerBucketEmptyEvent event) {
+		if (config.isBucketPartialFill() && deniedThisTick(event.getPlayer())) event.setCancelled(true);
+	}
+
 	@EventHandler
 	public void onQuit(PlayerQuitEvent event) {
 		lastActionTick.remove(event.getPlayer().getUniqueId());
+		deniedTick.remove(event.getPlayer().getUniqueId());
+	}
+
+	private boolean deniedThisTick(Player player) {
+		Integer t = deniedTick.get(player.getUniqueId());
+		return t != null && t == Bukkit.getCurrentTick();
 	}
 
 	// =========================================================================
@@ -274,11 +302,16 @@ public final class FluidContainerListener implements Listener {
 	//  Ray-trace + item helpers
 	// =========================================================================
 
-	/** Fully suppress the vanilla interaction (both block use and item use). */
-	private static void deny(PlayerInteractEvent event) {
+	/**
+	 * Fully suppress the vanilla interaction (both block use and item use), and
+	 * record the tick so the separate vanilla bucket fill/empty event fired this
+	 * same tick is cancelled too (see {@link #onBucketFill}/{@link #onBucketEmpty}).
+	 */
+	private void deny(PlayerInteractEvent event) {
 		event.setUseInteractedBlock(Event.Result.DENY);
 		event.setUseItemInHand(Event.Result.DENY);
 		event.setCancelled(true);
+		deniedTick.put(event.getPlayer().getUniqueId(), Bukkit.getCurrentTick());
 	}
 
 	/** The water block the player is aiming at, or null if they aren't aiming at water. */
