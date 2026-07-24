@@ -11,6 +11,7 @@ import ru.deelter.waterphysics.cache.BlockStateCache;
 import ru.deelter.waterphysics.cache.PlayerChunkCache;
 import ru.deelter.waterphysics.command.WaterCommand;
 import ru.deelter.waterphysics.config.PluginConfig;
+import ru.deelter.waterphysics.engine.EvaporationTicker;
 import ru.deelter.waterphysics.engine.FlowEngine;
 import ru.deelter.waterphysics.engine.WaterQueue;
 import ru.deelter.waterphysics.listener.BlockListener;
@@ -27,6 +28,7 @@ public final class WaterPhysics extends JavaPlugin {
 	private WaterQueue queue;
 	private FlowEngine engine;
 	private BukkitTask engineTask;
+	private EvaporationTicker evaporationTicker;
 	private Metrics metrics;
 	@Getter
 	private boolean physicsEnabled;
@@ -67,6 +69,10 @@ public final class WaterPhysics extends JavaPlugin {
 	public void onDisable() {
 		if (metrics != null) metrics.shutdown();
 		if (engineTask != null) engineTask.cancel();
+		if (evaporationTicker != null) {
+			evaporationTicker.stop();
+			evaporationTicker = null;
+		}
 
 		// SHUTDOWN SAFETY: flush remaining queue so no water blocks are left
 		// in a dangling state after a hard server restart.
@@ -157,12 +163,20 @@ public final class WaterPhysics extends JavaPlugin {
 	private void startEngine() {
 		engine = new FlowEngine(config, cache, proximity, queue);
 		engineTask = engine.runTaskTimer(this, 20L, config.getTickInterval());
+		if (config.isEvaporationEnabled()) {
+			evaporationTicker = new EvaporationTicker(this, config, engine);
+			evaporationTicker.start();
+		}
 	}
 
 	private void restartEngine() {
 		if (engineTask != null) {
 			engineTask.cancel();
 			engineTask = null;
+		}
+		if (evaporationTicker != null) {
+			evaporationTicker.stop();
+			evaporationTicker = null;
 		}
 		if (physicsEnabled) startEngine();
 	}

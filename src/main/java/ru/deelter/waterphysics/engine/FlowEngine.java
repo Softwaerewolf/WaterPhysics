@@ -12,6 +12,7 @@ import ru.deelter.waterphysics.config.PluginConfig;
 import ru.deelter.waterphysics.util.BlockKey;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static ru.deelter.waterphysics.cache.BlockStateCache.*;
 
@@ -83,6 +84,10 @@ public final class FlowEngine extends BukkitRunnable {
 	private final boolean biomeExclusionEnabled;
 	private final boolean removePuddles;
 	private final int removePuddleMaxUnits;
+	private final boolean evaporationEnabled;
+	private final int evaporationMinUnits;
+	private final int evaporationMinNeighbors;
+	private final float evaporationChance;
 	private final boolean soundsEnabled;
 	private final int soundRateLimitTicks;
 	private final float soundVolume;
@@ -90,6 +95,7 @@ public final class FlowEngine extends BukkitRunnable {
 	private final boolean effectsEnabled;
 	private final int effectsRateLimitTicks;
 	private final int effectsCount;
+	private final boolean effectsFallingWaterEnabled;
 
 	// Biome exclusion cache: keyed by 4x4x4 section position, value = is excluded.
 	// Biomes never change at runtime → safe to cache forever.
@@ -99,6 +105,8 @@ public final class FlowEngine extends BukkitRunnable {
 	private final Map<Long, Integer> lastSoundTick = new HashMap<>();
 	// Particle rate-limit: chunk key → last soundTick when effect played.
 	private final Map<Long, Integer> lastEffectTick = new HashMap<>();
+	// Fall-particle rate-limit: chunk key → last soundTick when a fall effect played.
+	private final Map<Long, Integer> lastFallEffectTick = new HashMap<>();
 	private int soundTick;
 
 	// Reused BFS scratch for findFlowDir — avoids per-call allocation.
@@ -132,6 +140,10 @@ public final class FlowEngine extends BukkitRunnable {
 		this.biomeExclusionEnabled = !config.getExcludedBiomes().isEmpty();
 		this.removePuddles = config.isRemovePuddles();
 		this.removePuddleMaxUnits = config.getRemovePuddleMaxUnits();
+		this.evaporationEnabled = config.isEvaporationEnabled();
+		this.evaporationMinUnits = config.getEvaporationMinUnits();
+		this.evaporationMinNeighbors = config.getEvaporationMinNeighbors();
+		this.evaporationChance = config.getEvaporationChance();
 		this.soundsEnabled = config.isSoundsEnabled();
 		this.soundRateLimitTicks = config.getSoundRateLimitTicks();
 		this.soundVolume = config.getSoundVolume();
@@ -139,6 +151,7 @@ public final class FlowEngine extends BukkitRunnable {
 		this.effectsEnabled = config.isEffectsEnabled();
 		this.effectsRateLimitTicks = config.getEffectsRateLimitTicks();
 		this.effectsCount = config.getEffectsCount();
+		this.effectsFallingWaterEnabled = config.isEffectsFallingWaterEnabled();
 	}
 
 	@Override
@@ -284,6 +297,40 @@ public final class FlowEngine extends BukkitRunnable {
 				queue.enqueue(world, x, upY, z);
 			}
 		}
+	}
+
+	/**
+	 * Random-tick evaporation for a single water cell, driven by
+	 * {@link ru.deelter.waterphysics.engine.EvaporationTicker} (not the flow
+	 * queue), so it reaches static, settled water the flow engine never
+	 * re-processes — not just actively flowing cells.
+	 * <p>
+	 * Applies the configured conditions and, on a successful roll, removes one
+	 * unit through the normal conserving path ({@link #place}) so the cache,
+	 * waterlogging and neighbour wake-ups stay consistent. No-op unless the
+	 * cell really is finite water at most {@code minimum-units} deep with fewer
+	 * than {@code minimum-neighbors} horizontal water neighbours. Must be
+	 * called on the thread/region that owns the cell (the ticker uses the
+	 * region scheduler to guarantee this).
+	 */
+	public void randomTickEvaporate(World world, int x, int y, int z) {
+		if (!evaporationEnabled) return;
+		if (!world.isChunkLoaded(x >> 4, z >> 4)) return;
+		if (!config.isWorldEnabled(world.getName())) return;
+
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+
+		if (getType(world, x, y, z) != TYPE_WATER) return;
+		if (isInfiniteSource(world, x, y, z)) return; // oceans never evaporate
+
+		int u = unitsAt(world, x, y, z);
+		if (u <= 0 || u > evaporationMinUnits) return;
+		if (horizontalWaterNeighbors(world, x, y, z) >= evaporationMinNeighbors) return;
+		if (ThreadLocalRandom.current().nextFloat() >= evaporationChance) return;
+
+		place(world, x, y, z, u - 1);
 	}
 
 	/** Whether (x,y,z) lies in an excluded biome, via the per-4x4x4-section cache. */
@@ -496,6 +543,19 @@ public final class FlowEngine extends BukkitRunnable {
 	}
 
 	/**
+	 * Count the four horizontal (X/Z axis) neighbours that are water, of any
+	 * level. Used by the evaporation check to tell edge/isolated water apart
+	 * from water in the interior of a body.
+	 */
+	private int horizontalWaterNeighbors(World world, int x, int y, int z) {
+		int n = 0;
+		for (int i = 0; i < 4; i++) {
+			if (getType(world, x + DX[i], y, z + DZ[i]) == TYPE_WATER) n++;
+		}
+		return n;
+	}
+
+	/**
 	 * A cell the active fluid can occupy/flow through: air, plant, or non-full same-fluid.
 	 */
 	private boolean isFlowPassable(World world, int x, int y, int z) {
@@ -546,7 +606,12 @@ public final class FlowEngine extends BukkitRunnable {
 				remaining -= add;
 			}
 		}
-		return units - remaining;
+
+		int placed = units - remaining;
+		if (placed > 0 && y - floor > 1) {
+			tryPlayFallEffect(world, x, y, floor, z);
+		}
+		return placed;
 	}
 
 	/**
@@ -845,6 +910,32 @@ public final class FlowEngine extends BukkitRunnable {
 				new Location(world, x + 0.5, y + 0.5, z + 0.5),
 				effectsCount,
 				0.3, 0.3, 0.3,
+				0.0);
+	}
+
+	/**
+	 * Spawn falling_water particles along a column that water just snapped
+	 * down (fall distance &gt; 1 block) — the engine moves falling water to
+	 * the bottom in a single step, so this visualises the drop the player
+	 * never saw. One burst spread vertically over the fallen column; only
+	 * near players, rate-limited per chunk like the other effects.
+	 */
+	private void tryPlayFallEffect(World world, int x, int topY, int floorY, int z) {
+		if (!effectsFallingWaterEnabled || !curIsWater) return;
+		if (playerProximityCheck && !proximity.isActive(world.getUID(), x, z)) return;
+
+		long ck = ((long) (x >> 4) << 32) | ((z >> 4) & 0xFFFFFFFFL);
+		int last = lastFallEffectTick.getOrDefault(ck, -effectsRateLimitTicks - 1);
+		if (soundTick - last < effectsRateLimitTicks) return;
+		lastFallEffectTick.put(ck, soundTick);
+
+		int dist = topY - floorY;
+		int count = Math.min(effectsCount * dist, effectsCount * 8);
+		world.spawnParticle(
+				Particle.FALLING_WATER,
+				new Location(world, x + 0.5, (topY + floorY) / 2.0 + 0.5, z + 0.5),
+				count,
+				0.25, dist / 2.0, 0.25,
 				0.0);
 	}
 

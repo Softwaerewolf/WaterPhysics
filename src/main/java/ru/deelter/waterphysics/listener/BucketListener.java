@@ -4,10 +4,12 @@ import lombok.RequiredArgsConstructor;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.data.Waterlogged;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import ru.deelter.waterphysics.WaterPhysics;
 import ru.deelter.waterphysics.cache.BlockStateCache;
 import ru.deelter.waterphysics.config.PluginConfig;
@@ -20,7 +22,12 @@ import ru.deelter.waterphysics.engine.WaterQueue;
  * The scan also includes y+1 above each water block — water adjacent to air
  * at a higher Y can act as an overflow point.
  * <p>
- * Deferred 1 tick so the placed water block is in the world before scanning.
+ * When a player picks water up with a bucket, wake the freed cell and its
+ * neighbours so the surrounding body flows into the gap — otherwise the
+ * removal leaves a stale cache entry and the water never re-flows.
+ * <p>
+ * Both are deferred 1 tick so the world reflects the bucket action before we
+ * scan/wake (the placed/removed water isn't applied until after the event).
  */
 @RequiredArgsConstructor
 public final class BucketListener implements Listener {
@@ -64,5 +71,34 @@ public final class BucketListener implements Listener {
 				}
 			}
 		});
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+	public void onBucketFill(PlayerBucketFillEvent event) {
+		if (!config.isBucketPhysicsEnabled()) return;
+
+		Block clicked = event.getBlockClicked();
+		World world = clicked.getWorld();
+		if (!config.isWorldEnabled(world.getName())) return;
+
+		// Only react to picking up water — a source block or a waterlogged
+		// block losing its water. Lava / powder-snow pickups don't concern the
+		// water engine. The removal hasn't applied yet at MONITOR time, so the
+		// block still reads as water here.
+		if (clicked.getType() != Material.WATER && !isWaterlogged(clicked)) return;
+
+		int bx = clicked.getX();
+		int by = clicked.getY();
+		int bz = clicked.getZ();
+
+		// Defer 1 tick: the water isn't removed from the world until after the
+		// event. wakeArea then invalidates the freed cell's stale cache and
+		// re-queues it plus its six neighbours so the body flows into the gap.
+		plugin.getServer().getScheduler().runTask(plugin, () ->
+				plugin.wakeArea(world, bx, by, bz));
+	}
+
+	private static boolean isWaterlogged(Block block) {
+		return block.getBlockData() instanceof Waterlogged wl && wl.isWaterlogged();
 	}
 }

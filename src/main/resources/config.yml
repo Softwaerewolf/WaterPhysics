@@ -47,6 +47,30 @@ flow:
   # Range 1-7.
   puddle-max-units: 1
 
+# ---- Evaporation ------------------------------------------
+# A random-tick pass (mirroring vanilla's randomTickSpeed) samples blocks in
+# the 3x3 loaded chunks around each online player every tick. A sampled
+# shallow water block at the edge of a body has a chance to lose one unit, so
+# puddles slowly dry up while the interior of a body (fully surrounded by
+# water) and ocean sources are left alone. Water only — lava never
+# evaporates. Off by default.
+evaporation:
+  # Enable evaporation.
+  enabled: false
+
+  # Only water blocks holding this many units OR FEWER are eligible to
+  # evaporate. 8 = full source, 1 = thinnest film. Clamped to 1-8.
+  minimum-units: 1
+
+  # A block evaporates only if it has FEWER than this many water neighbours
+  # on the X/Z (horizontal) axis. 1 = only fully isolated blocks (0 water
+  # neighbours); 4 = any block not fully surrounded by water. Clamped to 1-4.
+  minimum-neighbors: 2
+
+  # Probability (0.0 - 1.0) that an eligible block loses one unit on a given
+  # check. Clamped to 0.0-1.0. 0 = never, 1 = every check.
+  chance: 0.05
+
 # ---- Optimization -----------------------------------------
 optimization:
   # Only process water blocks in chunks near online players.
@@ -171,3 +195,9 @@ effects:
 
   # Particles per burst.
   count: 6
+
+  # Spawn falling_water particles along the drop whenever water snaps down
+  # more than 1 block (the engine moves falling water to the bottom of a
+  # column in a single step — this visualises the fall). Only plays near
+  # players and shares the rate limit above.
+  falling-water-enabled: true
