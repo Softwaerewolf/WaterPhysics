@@ -154,6 +154,48 @@ bucket:
   # Larger = more water gets re-evaluated per bucket use (more spread, more CPU).
   scan-radius: 8
 
+  # Finite bucket contents. When enabled, buckets track how many units of water
+  # they hold (0-8) as item NBT:
+  #   - An empty bucket used on water < 8 units fills a PARTIAL water bucket
+  #     holding exactly those units.
+  #   - A partial water bucket used on water (not sneaking) tops itself up from
+  #     that water, taking only as much as it needs / the water has.
+  #   - A partial water bucket used on water while SNEAKING deposits its units
+  #     into the targeted block.
+  #   - A partial water bucket used on air places exactly its units of water.
+  # When disabled, buckets behave the vanilla way (always 8 units).
+  partial-fill: true
+
+  # When water placed from a bucket would push a target tile above 8 units,
+  # spread the excess into the nearest air / flowing-water neighbours instead of
+  # discarding it; any units that still don't fit are kept in the bucket.
+  # When disabled, the target simply caps at 8 and the excess is lost.
+  preserve-overflow: true
+
+# ---- Bottle Mechanics -------------------------------------
+bottle:
+  # Finite-water accounting for glass bottles and water bottles. When enabled:
+  #   - Filling a glass bottle from water (or flowing water) deducts `unit-value`
+  #     units from that water.
+  #   - Using a water bottle (a water potion) while SNEAKING places `unit-value`
+  #     units of water on the targeted block, using the same placement/overflow
+  #     logic as a partial water bucket.
+  # When disabled, bottles behave the vanilla way.
+  consume: false
+
+  # How many water units one bottle is worth (clamped 1-8). Recommended: 3, so a
+  # 3-level water cauldron is worth one full (8-unit-capped) bucket, matching
+  # vanilla's "3 bottles = 1 cauldron" relationship.
+  unit-value: 3
+
+# ---- Cauldron Mechanics -----------------------------------
+cauldron:
+  # Treat each water-cauldron level as `bottle.unit-value` units when filling a
+  # bottle or bucket from the cauldron: a bottle takes one level (= unit-value),
+  # and a bucket takes all levels (levels x unit-value, capped at 8). Requires a
+  # water cauldron; needs no other feature flag.
+  use-bottle-units: false
+
 # ---- Lava Interaction -------------------------------------
 lava:
   # Convert flowing lava to cobblestone when touched by water.

@@ -64,6 +64,15 @@ public final class PluginConfig {
 	// Bucket
 	private final boolean bucketPhysicsEnabled;
 	private final int bucketScanRadius;
+	private final boolean bucketPartialFill;
+	private final boolean bucketPreserveOverflow;
+
+	// Bottle
+	private final boolean bottleConsume;
+	private final int bottleUnitValue;
+
+	// Cauldron
+	private final boolean cauldronUseBottleUnits;
 
 	// Lava
 	private final boolean convertLava;
@@ -126,6 +135,13 @@ public final class PluginConfig {
 
 		this.bucketPhysicsEnabled = cfg.getBoolean("bucket.enabled", true);
 		this.bucketScanRadius = Math.clamp(cfg.getInt("bucket.scan-radius", 8), 1, 16);
+		this.bucketPartialFill = cfg.getBoolean("bucket.partial-fill", true);
+		this.bucketPreserveOverflow = cfg.getBoolean("bucket.preserve-overflow", true);
+
+		this.bottleConsume = cfg.getBoolean("bottle.consume", false);
+		this.bottleUnitValue = Math.clamp(cfg.getInt("bottle.unit-value", 3), 1, 8);
+
+		this.cauldronUseBottleUnits = cfg.getBoolean("cauldron.use-bottle-units", false);
 
 		this.convertLava = cfg.getBoolean("lava.convert-to-cobblestone", true);
 		this.convertLavaSource = cfg.getBoolean("lava.convert-source-to-obsidian", true);

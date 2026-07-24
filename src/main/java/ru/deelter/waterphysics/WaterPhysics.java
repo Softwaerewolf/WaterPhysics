@@ -17,6 +17,7 @@ import ru.deelter.waterphysics.engine.WaterQueue;
 import ru.deelter.waterphysics.listener.BlockListener;
 import ru.deelter.waterphysics.listener.BucketListener;
 import ru.deelter.waterphysics.listener.ChunkListener;
+import ru.deelter.waterphysics.listener.FluidContainerListener;
 import ru.deelter.waterphysics.listener.WaterEventListener;
 import ru.deelter.waterphysics.metrics.PluginMetrics;
 
@@ -26,6 +27,7 @@ public final class WaterPhysics extends JavaPlugin {
 	private BlockStateCache cache;
 	private PlayerChunkCache proximity;
 	private WaterQueue queue;
+	@Getter
 	private FlowEngine engine;
 	private BukkitTask engineTask;
 	private EvaporationTicker evaporationTicker;
@@ -154,6 +156,7 @@ public final class WaterPhysics extends JavaPlugin {
 		getServer().getPluginManager().registerEvents(new BlockListener(cache, queue), this);
 		getServer().getPluginManager().registerEvents(new ChunkListener(config, cache, queue, this), this);
 		getServer().getPluginManager().registerEvents(new BucketListener(config, cache, queue, this), this);
+		getServer().getPluginManager().registerEvents(new FluidContainerListener(config, this), this);
 	}
 
 	private void loadConfig() {

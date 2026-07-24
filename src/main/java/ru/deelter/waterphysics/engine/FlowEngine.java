@@ -333,6 +333,86 @@ public final class FlowEngine extends BukkitRunnable {
 		place(world, x, y, z, u - 1);
 	}
 
+	// =========================================================================
+	//  Public API for container interactions (buckets / bottles / cauldrons)
+	// =========================================================================
+
+	/** Water units (0-8) at a cell; 0 if the cell is not water. */
+	public int waterUnitsAt(World world, int x, int y, int z) {
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+		if (getType(world, x, y, z) != TYPE_WATER) return 0;
+		return unitsAt(world, x, y, z);
+	}
+
+	/**
+	 * Set a cell to exactly {@code units} (0-8) of water through the conserving
+	 * path — 0 clears it to air. Cache, waterlogging and neighbour wake-ups are
+	 * kept consistent. Refuses to overwrite non-air/plant/water blocks.
+	 */
+	public void setWaterUnits(World world, int x, int y, int z, int units) {
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+		place(world, x, y, z, Math.max(0, Math.min(8, units)));
+	}
+
+	/**
+	 * Add {@code units} of water at (x,y,z): fill that cell up to 8, then — if
+	 * {@code preserveOverflow} — breadth-first spread any excess into the
+	 * nearest air / partial-water neighbours. Returns the number of units that
+	 * could not be placed anywhere (0 if all consumed). With
+	 * {@code preserveOverflow} false, only the origin cell is filled and the
+	 * excess is returned (the caller decides whether to discard it).
+	 */
+	public int addWaterWithOverflow(World world, int x, int y, int z, int units, boolean preserveOverflow) {
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+		if (units <= 0) return 0;
+
+		int remaining = units - fillCell(world, x, y, z, units);
+		if (remaining <= 0 || !preserveOverflow) return remaining;
+
+		ArrayDeque<int[]> q = new ArrayDeque<>();
+		HashSet<Long> seen = new HashSet<>();
+		seen.add(BlockKey.of(x, y, z));
+		pushNeighbors(q, seen, x, y, z);
+
+		final int cap = 512;
+		while (remaining > 0 && !q.isEmpty() && seen.size() <= cap) {
+			int[] c = q.poll();
+			remaining -= fillCell(world, c[0], c[1], c[2], remaining);
+			if (remaining <= 0) break;
+			pushNeighbors(q, seen, c[0], c[1], c[2]);
+		}
+		return remaining;
+	}
+
+	private void pushNeighbors(ArrayDeque<int[]> q, HashSet<Long> seen, int x, int y, int z) {
+		for (int i = 0; i < 6; i++) {
+			int nx = x + NX6[i];
+			int ny = y + NY6[i];
+			int nz = z + NZ6[i];
+			if (seen.add(BlockKey.of(nx, ny, nz))) q.add(new int[]{nx, ny, nz});
+		}
+	}
+
+	/** Fill a single cell with up to {@code amount} water (air/plant/water<8 only). Returns units placed. */
+	private int fillCell(World world, int x, int y, int z, int amount) {
+		if (amount <= 0 || y < minY(world) || y > maxY(world)) return 0;
+		byte t = getType(world, x, y, z);
+		int cur;
+		if (t == TYPE_WATER) cur = unitsAt(world, x, y, z);
+		else if (t == TYPE_AIR || t == TYPE_PLANT) cur = 0;
+		else return 0; // solid — cannot place here
+		if (cur >= 8) return 0;
+		int add = Math.min(amount, 8 - cur);
+		if (add <= 0) return 0;
+		return place(world, x, y, z, cur + add) ? add : 0;
+	}
+
 	/** Whether (x,y,z) lies in an excluded biome, via the per-4x4x4-section cache. */
 	private boolean isExcludedBiome(World world, int x, int y, int z) {
 		if (!biomeExclusionEnabled) return false;
