@@ -1,6 +1,7 @@
 package ru.deelter.waterphysics.listener;
 
 import net.kyori.adventure.text.Component;
+import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
@@ -17,6 +18,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -28,7 +30,10 @@ import ru.deelter.waterphysics.WaterPhysics;
 import ru.deelter.waterphysics.config.PluginConfig;
 import ru.deelter.waterphysics.engine.FlowEngine;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * Finite-water container interactions: partial water buckets (with a units
@@ -39,14 +44,25 @@ import java.util.List;
  * fluid ray-trace, cancelling vanilla only for the cases it actually takes
  * over — so when the relevant feature flags are off, buckets and bottles keep
  * their vanilla behaviour and the existing {@link BucketListener} still runs.
+ * <p>
+ * A single physical right-click can dispatch more than one interact event (the
+ * off-hand pass, or a client re-send once the held item has been swapped).
+ * Without a guard that let an empty bucket pick water up and then immediately
+ * re-place it, and let rapid clicking duplicate water. A short per-player
+ * debounce ({@link #DEBOUNCE_TICKS}) ensures at most one container action per
+ * player in that window, keeping every change on a single, ordered path.
  */
 public final class FluidContainerListener implements Listener {
 
 	private static final double REACH = 5.0;
+	private static final int DEBOUNCE_TICKS = 4;
 
 	private final PluginConfig config;
 	private final WaterPhysics plugin;
 	private final NamespacedKey unitsKey;
+
+	// player -> server tick of their last handled container action.
+	private final Map<UUID, Integer> lastActionTick = new HashMap<>();
 
 	public FluidContainerListener(PluginConfig config, WaterPhysics plugin) {
 		this.config = config;
@@ -56,7 +72,7 @@ public final class FluidContainerListener implements Listener {
 
 	@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
 	public void onInteract(PlayerInteractEvent event) {
-		if (event.getHand() != EquipmentSlot.HAND) return; // main hand only, avoid double-fire
+		if (event.getHand() != EquipmentSlot.HAND) return; // main hand only
 		Action action = event.getAction();
 		if (action != Action.RIGHT_CLICK_AIR && action != Action.RIGHT_CLICK_BLOCK) return;
 
@@ -69,20 +85,33 @@ public final class FluidContainerListener implements Listener {
 		FlowEngine engine = plugin.getEngine();
 		if (engine == null) return; // physics disabled
 
-		switch (item.getType()) {
-			case BUCKET -> { if (config.isBucketPartialFill()) handleEmptyBucket(event, engine, item); }
-			case WATER_BUCKET -> { if (config.isBucketPartialFill()) handleWaterBucket(event, engine, item); }
-			case GLASS_BOTTLE -> { if (config.isBottleConsume()) handleGlassBottle(event, engine); }
-			case POTION -> { if (config.isBottleConsume()) handleWaterBottle(event, engine, item); }
-			default -> { }
-		}
+		// Debounce: swallow the duplicate/cascade events a single click produces
+		// and throttle rapid clicking so water can't be duplicated.
+		int tick = Bukkit.getCurrentTick();
+		Integer last = lastActionTick.get(player.getUniqueId());
+		if (last != null && tick - last < DEBOUNCE_TICKS) return;
+
+		boolean acted = switch (item.getType()) {
+			case BUCKET -> config.isBucketPartialFill() && handleEmptyBucket(event, engine, item);
+			case WATER_BUCKET -> config.isBucketPartialFill() && handleWaterBucket(event, engine, item);
+			case GLASS_BOTTLE -> config.isBottleConsume() && handleGlassBottle(event, engine);
+			case POTION -> config.isBottleConsume() && handleWaterBottle(event, engine, item);
+			default -> false;
+		};
+		if (acted) lastActionTick.put(player.getUniqueId(), tick);
+	}
+
+	@EventHandler
+	public void onQuit(PlayerQuitEvent event) {
+		lastActionTick.remove(event.getPlayer().getUniqueId());
 	}
 
 	// =========================================================================
 	//  Buckets
 	// =========================================================================
 
-	private void handleEmptyBucket(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
+	/** @return true if a bucket action was performed (and the event cancelled). */
+	private boolean handleEmptyBucket(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
@@ -90,57 +119,58 @@ public final class FluidContainerListener implements Listener {
 		Block clicked = event.getClickedBlock();
 		if (config.isCauldronUseBottleUnits() && clicked != null && clicked.getType() == Material.WATER_CAULDRON) {
 			int level = cauldronLevel(clicked);
-			if (level <= 0) return;
+			if (level <= 0) return false;
 			int units = Math.min(8, level * config.getBottleUnitValue());
 			clicked.setType(Material.CAULDRON, false); // empty the cauldron
 			event.setCancelled(true);
 			consumeAndGive(player, event.getHand(), makeWaterBucket(units));
 			playSound(player, clicked, Sound.ITEM_BUCKET_FILL);
-			return;
+			return true;
 		}
 
 		Block water = rayTraceWater(player);
-		if (water == null) return;
+		if (water == null) return false;
 		int w = engine.waterUnitsAt(world, water.getX(), water.getY(), water.getZ());
-		if (w <= 0) return;
+		if (w <= 0) return false;
 
 		int taken = Math.min(8, w); // an empty bucket takes all of it
 		engine.setWaterUnits(world, water.getX(), water.getY(), water.getZ(), w - taken);
 		event.setCancelled(true);
 		consumeAndGive(player, event.getHand(), makeWaterBucket(taken));
 		playSound(player, water, Sound.ITEM_BUCKET_FILL);
+		return true;
 	}
 
-	private void handleWaterBucket(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
+	private boolean handleWaterBucket(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
 		// Leave water-bucket -> cauldron filling to vanilla.
 		Block clicked = event.getClickedBlock();
 		if (clicked != null && (clicked.getType() == Material.CAULDRON || clicked.getType() == Material.WATER_CAULDRON)) {
-			return;
+			return false;
 		}
 
 		RayTraceResult r = player.rayTraceBlocks(REACH, FluidCollisionMode.ALWAYS);
-		if (r == null || r.getHitBlock() == null) return;
+		if (r == null || r.getHitBlock() == null) return false;
 		Block hit = r.getHitBlock();
 		BlockFace face = r.getHitBlockFace();
 		boolean hitWater = hit.getType() == Material.WATER;
 		boolean sneaking = player.isSneaking();
 		int b = bucketUnits(item);
-		if (b <= 0) return;
+		if (b <= 0) return false;
 
 		// Not sneaking, aimed at water, bucket not full -> top the bucket up.
 		if (hitWater && !sneaking && b < 8) {
 			int w = engine.waterUnitsAt(world, hit.getX(), hit.getY(), hit.getZ());
-			if (w <= 0) return;
+			if (w <= 0) return false;
 			int taken = Math.min(8 - b, w);
-			if (taken <= 0) return;
+			if (taken <= 0) return false;
 			engine.setWaterUnits(world, hit.getX(), hit.getY(), hit.getZ(), w - taken);
 			event.setCancelled(true);
 			setHeldWaterBucket(player, event.getHand(), b + taken);
 			playSound(player, hit, Sound.ITEM_BUCKET_FILL);
-			return;
+			return true;
 		}
 
 		// Otherwise deposit: into the aimed water block when sneaking, else onto
@@ -149,10 +179,10 @@ public final class FluidContainerListener implements Listener {
 		if (hitWater && sneaking) {
 			target = hit;
 		} else {
-			if (face == null) return;
+			if (face == null) return false;
 			target = hit.getRelative(face);
 		}
-		if (target.getType() != Material.WATER && !target.isPassable()) return; // can't place into a solid
+		if (target.getType() != Material.WATER && !target.isPassable()) return false; // solid
 
 		int leftover = engine.addWaterWithOverflow(world, target.getX(), target.getY(), target.getZ(),
 				b, config.isBucketPreserveOverflow());
@@ -160,41 +190,43 @@ public final class FluidContainerListener implements Listener {
 		event.setCancelled(true);
 		setHeldWaterBucket(player, event.getHand(), keep);
 		playSound(player, target, Sound.ITEM_BUCKET_EMPTY);
+		return true;
 	}
 
 	// =========================================================================
 	//  Bottles
 	// =========================================================================
 
-	private void handleGlassBottle(PlayerInteractEvent event, FlowEngine engine) {
+	private boolean handleGlassBottle(PlayerInteractEvent event, FlowEngine engine) {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
 		// Filling a bottle from a cauldron already consumes exactly one level,
 		// which equals one unit-value — leave it to vanilla.
 		Block clicked = event.getClickedBlock();
-		if (clicked != null && clicked.getType() == Material.WATER_CAULDRON) return;
+		if (clicked != null && clicked.getType() == Material.WATER_CAULDRON) return false;
 
 		Block water = rayTraceWater(player);
-		if (water == null) return;
+		if (water == null) return false;
 		int w = engine.waterUnitsAt(world, water.getX(), water.getY(), water.getZ());
-		if (w <= 0) return;
+		if (w <= 0) return false;
 
 		int deduct = Math.min(config.getBottleUnitValue(), w);
 		engine.setWaterUnits(world, water.getX(), water.getY(), water.getZ(), w - deduct);
 		event.setCancelled(true);
 		consumeAndGive(player, event.getHand(), waterPotion());
 		playSound(player, water, Sound.ITEM_BOTTLE_FILL);
+		return true;
 	}
 
-	private void handleWaterBottle(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
+	private boolean handleWaterBottle(PlayerInteractEvent event, FlowEngine engine, ItemStack item) {
 		Player player = event.getPlayer();
-		if (!player.isSneaking()) return; // only sneaking places water
-		if (!(item.getItemMeta() instanceof PotionMeta pm) || pm.getBasePotionType() != PotionType.WATER) return;
+		if (!player.isSneaking()) return false; // only sneaking places water
+		if (!(item.getItemMeta() instanceof PotionMeta pm) || pm.getBasePotionType() != PotionType.WATER) return false;
 
 		World world = player.getWorld();
 		RayTraceResult r = player.rayTraceBlocks(REACH, FluidCollisionMode.ALWAYS);
-		if (r == null || r.getHitBlock() == null) return;
+		if (r == null || r.getHitBlock() == null) return false;
 		Block hit = r.getHitBlock();
 		BlockFace face = r.getHitBlockFace();
 
@@ -202,16 +234,17 @@ public final class FluidContainerListener implements Listener {
 		if (hit.getType() == Material.WATER) {
 			target = hit;
 		} else {
-			if (face == null) return;
+			if (face == null) return false;
 			target = hit.getRelative(face);
 		}
-		if (target.getType() != Material.WATER && !target.isPassable()) return;
+		if (target.getType() != Material.WATER && !target.isPassable()) return false;
 
 		engine.addWaterWithOverflow(world, target.getX(), target.getY(), target.getZ(),
 				config.getBottleUnitValue(), config.isBucketPreserveOverflow());
 		event.setCancelled(true);
 		consumeAndGive(player, event.getHand(), new ItemStack(Material.GLASS_BOTTLE));
 		playSound(player, target, Sound.ITEM_BOTTLE_EMPTY);
+		return true;
 	}
 
 	// =========================================================================
