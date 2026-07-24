@@ -129,24 +129,27 @@ public final class FluidContainerListener implements Listener {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
+		player.sendMessage('handleEmptyBucket');
+
 		// Fill a bucket from a water cauldron with unit accounting.
 		Block clicked = event.getClickedBlock();
 		if (config.isCauldronUseBottleUnits() && clicked != null && clicked.getType() == Material.WATER_CAULDRON) {
 			int level = cauldronLevel(clicked);
 			if (level <= 0) return false; // empty cauldron -> leave to vanilla
 			deny(event); // we take over this cauldron pickup
-			if (debounced) return false;
+			if (debounced) return debounce(event);;
 			int units = Math.min(8, level * config.getBottleUnitValue());
 			clicked.setType(Material.CAULDRON, false); // empty the cauldron
 			consumeAndGive(player, event.getHand(), makeWaterBucket(units));
 			playSound(player, clicked, Sound.ITEM_BUCKET_FILL);
+			player.sendMessage('emptied cauldron');
 			return true;
 		}
 
 		Block water = rayTraceWater(player);
 		if (water == null) return false; // not aiming at water -> vanilla (lava, etc.)
 		deny(event); // we own water pickup
-		if (debounced) return false; // swallow the cascade / rapid clicks
+		if (debounced) return debounce(event);; // swallow the cascade / rapid clicks
 
 		int w = engine.waterUnitsAt(world, water.getX(), water.getY(), water.getZ());
 		if (w <= 0) return false;
@@ -154,6 +157,7 @@ public final class FluidContainerListener implements Listener {
 		engine.setWaterUnits(world, water.getX(), water.getY(), water.getZ(), w - taken);
 		consumeAndGive(player, event.getHand(), makeWaterBucket(taken));
 		playSound(player, water, Sound.ITEM_BUCKET_FILL);
+		player.sendMessage('filled bucket');
 		return true;
 	}
 
@@ -161,9 +165,12 @@ public final class FluidContainerListener implements Listener {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
+		player.sendMessage('handleWaterBucket');
+
 		// Leave water-bucket -> cauldron filling to vanilla.
 		Block clicked = event.getClickedBlock();
 		if (clicked != null && (clicked.getType() == Material.CAULDRON || clicked.getType() == Material.WATER_CAULDRON)) {
+			player.sendMessage('vanilla fill cauldron with bucket');
 			return false;
 		}
 
@@ -175,7 +182,7 @@ public final class FluidContainerListener implements Listener {
 		// While partial-fill is on we own every water-bucket placement, so vanilla
 		// never places a full source that ignores the unit model. Deny it up front.
 		deny(event);
-		if (debounced) return false; // swallow the cascade / rapid clicks
+		if (debounced) return debounce(event);; // swallow the cascade / rapid clicks
 
 		boolean hitWater = hit.getType() == Material.WATER;
 		boolean sneaking = player.isSneaking();
@@ -191,6 +198,7 @@ public final class FluidContainerListener implements Listener {
 			engine.setWaterUnits(world, hit.getX(), hit.getY(), hit.getZ(), w - taken);
 			setHeldWaterBucket(player, event.getHand(), b + taken);
 			playSound(player, hit, Sound.ITEM_BUCKET_FILL);
+			player.sendMessage('topped up bucket');
 			return true;
 		}
 
@@ -200,16 +208,23 @@ public final class FluidContainerListener implements Listener {
 		if (hitWater && sneaking) {
 			target = hit;
 		} else {
-			if (face == null) return false;
+			if (face == null) {
+				player.sendMessage('no face return');
+				return false;
+			}
 			target = hit.getRelative(face);
 		}
-		if (target.getType() != Material.WATER && !target.isPassable()) return false; // solid
+		if (target.getType() != Material.WATER && !target.isPassable()) {
+			player.sendMessage('target solid return');
+			return false; // solid
+		}
 
 		int leftover = engine.addWaterWithOverflow(world, target.getX(), target.getY(), target.getZ(),
 				b, config.isBucketPreserveOverflow());
 		int keep = config.isBucketPreserveOverflow() ? leftover : 0;
 		setHeldWaterBucket(player, event.getHand(), keep);
 		playSound(player, target, Sound.ITEM_BUCKET_EMPTY);
+		player.sendMessage('emptied bucket with leftover maybe');
 		return true;
 	}
 
@@ -221,6 +236,8 @@ public final class FluidContainerListener implements Listener {
 		Player player = event.getPlayer();
 		World world = player.getWorld();
 
+		player.sendMessage('handleGlassBottle');
+
 		// Filling a bottle from a cauldron already consumes exactly one level,
 		// which equals one unit-value — leave it to vanilla.
 		Block clicked = event.getClickedBlock();
@@ -229,7 +246,7 @@ public final class FluidContainerListener implements Listener {
 		Block water = rayTraceWater(player);
 		if (water == null) return false; // not aiming at water -> vanilla
 		deny(event);
-		if (debounced) return false;
+		if (debounced) return debounce(event);;
 
 		int w = engine.waterUnitsAt(world, water.getX(), water.getY(), water.getZ());
 		if (w <= 0) return false;
@@ -237,6 +254,7 @@ public final class FluidContainerListener implements Listener {
 		engine.setWaterUnits(world, water.getX(), water.getY(), water.getZ(), w - deduct);
 		consumeAndGive(player, event.getHand(), waterPotion());
 		playSound(player, water, Sound.ITEM_BOTTLE_FILL);
+		player.sendMessage('filled bottle');
 		return true;
 	}
 
@@ -244,6 +262,8 @@ public final class FluidContainerListener implements Listener {
 		Player player = event.getPlayer();
 		if (!player.isSneaking()) return false; // only sneaking places water
 		if (!(item.getItemMeta() instanceof PotionMeta pm) || pm.getBasePotionType() != PotionType.WATER) return false;
+
+		player.sendMessage('handleWaterBottle');
 
 		World world = player.getWorld();
 		RayTraceResult r = player.rayTraceBlocks(REACH, FluidCollisionMode.ALWAYS);
@@ -255,18 +275,25 @@ public final class FluidContainerListener implements Listener {
 		if (hit.getType() == Material.WATER) {
 			target = hit;
 		} else {
-			if (face == null) return false;
+			if (face == null) {
+				player.sendMessage('no face return');
+				return false;
+			}
 			target = hit.getRelative(face);
 		}
-		if (target.getType() != Material.WATER && !target.isPassable()) return false;
+		if (target.getType() != Material.WATER && !target.isPassable()) {
+			player.sendMessage('not water or passable return');
+			return false;
+		}
 
 		deny(event);
-		if (debounced) return false;
+		if (debounced) return debounce(event);;
 
 		engine.addWaterWithOverflow(world, target.getX(), target.getY(), target.getZ(),
 				config.getBottleUnitValue(), config.isBucketPreserveOverflow());
 		consumeAndGive(player, event.getHand(), new ItemStack(Material.GLASS_BOTTLE));
 		playSound(player, target, Sound.ITEM_BOTTLE_EMPTY);
+		player.sendMessage('emptied bottle');
 		return true;
 	}
 
@@ -276,9 +303,15 @@ public final class FluidContainerListener implements Listener {
 
 	/** Fully suppress the vanilla interaction (both block use and item use). */
 	private static void deny(PlayerInteractEvent event) {
+		event.getPlayer().sendMessage('event denied');
 		event.setUseInteractedBlock(Event.Result.DENY);
 		event.setUseItemInHand(Event.Result.DENY);
 		event.setCancelled(true);
+	}
+
+	private static boolean debounce(PlayerInteractEvent event) {
+		event.getPlayer().sendMessage('debounced');
+		return false;
 	}
 
 	/** The water block the player is aiming at, or null if they aren't aiming at water. */
