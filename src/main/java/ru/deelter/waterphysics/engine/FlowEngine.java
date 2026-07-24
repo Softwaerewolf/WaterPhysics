@@ -207,8 +207,12 @@ public final class FlowEngine extends BukkitRunnable {
 			boolean canFall = dt == TYPE_AIR || dt == TYPE_PLANT
 					|| (dt == curType && unitsAt(world, x, downY, z) < 8);
 			if (canFall) {
-				setAir(world, x, y, z);             // empty origin
-				addWaterFalling(world, x, y, z, u); // pour the whole column to the floor
+				// Verified removal of the origin: if the cell isn't truly our
+				// fluid (changed without an event), the cache has been fixed
+				// and there are no real units to move.
+				if (setAir(world, x, y, z)) {
+					addWaterFalling(world, x, y, z, u); // pour the whole column to the floor
+				}
 				return;
 			}
 		}
@@ -241,8 +245,7 @@ public final class FlowEngine extends BukkitRunnable {
 			int nu = (nt == curType) ? unitsAt(world, nx, y, nz) : 0;
 			if (nu < 8 && canDescend(world, nx, y, nz)) {
 				int move = Math.min(u, 8 - nu);
-				addWaterFalling(world, nx, y, nz, move);
-				u -= move;
+				u -= addWaterFalling(world, nx, y, nz, move); // deduct only what really landed
 			}
 		}
 
@@ -259,8 +262,7 @@ public final class FlowEngine extends BukkitRunnable {
 				int nz = z + DZ[dir];
 				int nu = unitsAt(world, nx, y, nz);
 				if (nu < u) {
-					addWaterFalling(world, nx, y, nz, 1);
-					u--;
+					u -= addWaterFalling(world, nx, y, nz, 1); // deduct only what really landed
 				}
 			}
 		}
@@ -508,9 +510,14 @@ public final class FlowEngine extends BukkitRunnable {
 	 * (air / plant / non-full water), then fills from the floor upward — so a
 	 * deep drop reaches the cave floor this tick and stacks from the bottom,
 	 * instead of trickling down one block per tick or hanging in mid-air.
+	 *
+	 * @return the number of units actually deposited. A cell whose real block
+	 *         turns out not to be fillable (changed without an event — /fill,
+	 *         growth, …) refuses placement and the water backs up to the cells
+	 *         above it; the caller keeps whatever could not be placed at all.
 	 */
-	private void addWaterFalling(World world, int x, int y, int z, int units) {
-		if (units <= 0) return;
+	private int addWaterFalling(World world, int x, int y, int z, int units) {
+		if (units <= 0) return 0;
 
 		// Find the lowest cell water can occupy in this column.
 		int floor = y;
@@ -531,14 +538,15 @@ public final class FlowEngine extends BukkitRunnable {
 		}
 
 		// Fill from the bottom up; overflow backs up toward y.
-		for (int cy = floor; units > 0 && cy <= y; cy++) {
+		int remaining = units;
+		for (int cy = floor; remaining > 0 && cy <= y; cy++) {
 			int existing = unitsAt(world, x, cy, z);
-			int add = Math.min(units, 8 - existing);
-			if (add > 0) {
-				place(world, x, cy, z, existing + add);
-				units -= add;
+			int add = Math.min(remaining, 8 - existing);
+			if (add > 0 && place(world, x, cy, z, existing + add)) {
+				remaining -= add;
 			}
 		}
+		return units - remaining;
 	}
 
 	/**
@@ -546,19 +554,21 @@ public final class FlowEngine extends BukkitRunnable {
 	 * 0 → air, 8 → source (level 0), else flowing level (8 - units).
 	 * Routes through setWater/applyLevel so cache, waterlog and re-queue
 	 * side-effects stay consistent.
+	 *
+	 * @return {@code true} if the cell now holds the requested state; false if
+	 *         the real block refused the write (see {@link #setWater}).
 	 */
-	private void place(World world, int x, int y, int z, int units) {
+	private boolean place(World world, int x, int y, int z, int units) {
 		if (units <= 0) {
 			if (getType(world, x, y, z) == curType) setAir(world, x, y, z);
-			return;
+			return true;
 		}
 		if (units > 8) units = 8;
 		int level = (units >= 8) ? 0 : 8 - units;
 		if (getType(world, x, y, z) == curType) {
-			applyLevel(world, x, y, z, level);
-		} else {
-			setWater(world, x, y, z, level);
+			return applyLevel(world, x, y, z, level);
 		}
+		return setWater(world, x, y, z, level);
 	}
 
 	// =========================================================================
@@ -634,16 +644,28 @@ public final class FlowEngine extends BukkitRunnable {
 	//  Block mutation helpers
 	// =========================================================================
 
-	private void setWater(World world, int x, int y, int z, int level) {
-		if (y < minY(world) || y > maxY(world)) return;
+	/**
+	 * Convert the cell to the active fluid at {@code level}. Blocks can appear
+	 * without any Bukkit event (/fill, tree growth, …), so the cache alone
+	 * must never justify overwriting a cell: the block's REAL type is re-read
+	 * here first, and only air and plant-like blocks are replaceable. Anything
+	 * else refuses, re-syncs the cache from the real block, and returns false.
+	 */
+	private boolean setWater(World world, int x, int y, int z, int level) {
+		if (y < minY(world) || y > maxY(world)) return false;
 
 		long key = BlockKey.of(x, y, z);
 		UUID wid = world.getUID();
 
 		Block block = world.getBlockAt(x, y, z);
 		if (block.getType() != curMat) {
+			byte real = computeType(block);
+			if (real != TYPE_AIR && real != TYPE_PLANT) {
+				cache.preload(block); // stale cache led us here — correct it
+				return false;
+			}
 			// Drop items for replaceable blocks (carpets, moss, plants, etc.) before flooding
-			if (!block.getType().isAir() && cache.getType(world, x, y, z) == TYPE_PLANT) {
+			if (real == TYPE_PLANT) {
 				block.breakNaturally();
 			}
 			block.setType(curMat, false);
@@ -673,13 +695,29 @@ public final class FlowEngine extends BukkitRunnable {
 				}
 			}
 		}
+		return true;
 	}
 
-	private void setAir(World world, int x, int y, int z) {
+	/**
+	 * Remove the active fluid from a cell. Verifies the block really is that
+	 * fluid before touching it — if the world changed under us without an
+	 * event (/fill, growth, …), the cache is re-synced and nothing is
+	 * destroyed.
+	 *
+	 * @return {@code true} only if the fluid was actually removed; false means
+	 *         the cell held something else (phantom cache entry) and the
+	 *         caller must not move the units it thought were here.
+	 */
+	private boolean setAir(World world, int x, int y, int z) {
 		long key = BlockKey.of(x, y, z);
 		UUID wid = world.getUID();
 
-		world.getBlockAt(x, y, z).setType(Material.AIR, false);
+		Block block = world.getBlockAt(x, y, z);
+		if (block.getType() != curMat) {
+			cache.preload(block); // stale cache — correct it, touch nothing
+			return false;
+		}
+		block.setType(Material.AIR, false);
 		cache.putType(wid, key, TYPE_AIR);
 		cache.putLevel(wid, key, (byte) 0);
 
@@ -689,21 +727,21 @@ public final class FlowEngine extends BukkitRunnable {
 		if (waterlogEnabled && curIsWater) {
 			forceUnwaterlogNeighbors(world, x, y, z);
 		}
+		return true;
 	}
 
-	private void applyLevel(World world, int x, int y, int z, int level) {
+	private boolean applyLevel(World world, int x, int y, int z, int level) {
 		if (level >= 8) {
-			setAir(world, x, y, z);
-			return;
+			return setAir(world, x, y, z);
 		}
-		if (y < minY(world) || y > maxY(world)) return;
+		if (y < minY(world) || y > maxY(world)) return false;
 
 		long key = BlockKey.of(x, y, z);
 		UUID wid = world.getUID();
 
 		byte oldLevel = cache.getLevel(world, x, y, z);
 		if (cache.getType(world, x, y, z) == curType && oldLevel == (byte) level) {
-			return; // Level unchanged — do not re-queue
+			return true; // Level unchanged — do not re-queue
 		}
 
 		Block block = world.getBlockAt(x, y, z);
@@ -711,8 +749,7 @@ public final class FlowEngine extends BukkitRunnable {
 			ld.setLevel(level);
 			block.setBlockData(ld, false);
 		} else {
-			setWater(world, x, y, z, level);
-			return;
+			return setWater(world, x, y, z, level);
 		}
 
 		cache.putType(wid, key, curType);
@@ -730,6 +767,7 @@ public final class FlowEngine extends BukkitRunnable {
 				}
 			}
 		}
+		return true;
 	}
 
 	/**
@@ -750,10 +788,20 @@ public final class FlowEngine extends BukkitRunnable {
 		}
 	}
 
+	/**
+	 * Solidify a lava cell (cobblestone/obsidian). Verifies the block really
+	 * is lava first — the cache may be stale if the cell changed without an
+	 * event — and refuses rather than overwrite anything else.
+	 */
 	private void setSolid(World world, int x, int y, int z, Material material) {
+		Block block = world.getBlockAt(x, y, z);
+		if (block.getType() != Material.LAVA) {
+			cache.preload(block); // stale cache — correct it, touch nothing
+			return;
+		}
 		long key = BlockKey.of(x, y, z);
 		UUID wid = world.getUID();
-		world.getBlockAt(x, y, z).setType(material, false);
+		block.setType(material, false);
 		cache.putType(wid, key, TYPE_OTHER);
 		cache.putLevel(wid, key, (byte) 0);
 	}

@@ -7,8 +7,11 @@ import org.bukkit.block.BlockFace;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.block.BlockState;
 import org.bukkit.event.block.*;
+import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.world.StructureGrowEvent;
 import ru.deelter.waterphysics.cache.BlockStateCache;
 import ru.deelter.waterphysics.engine.WaterQueue;
 import ru.deelter.waterphysics.util.BlockKey;
@@ -84,6 +87,39 @@ public final class BlockListener implements Listener {
 		for (Block block : blocks) {
 			invalidateAndQueueNeighbours(block);
 			invalidateAndQueueNeighbours(block.getRelative(dir));
+		}
+	}
+
+	/**
+	 * Trees/mushrooms grown from saplings or bone meal appear via this event —
+	 * never through block place events — so the cache would keep treating the
+	 * new logs/leaves as the air they replaced. Invalidate every affected cell;
+	 * the blocks are not placed yet at MONITOR time, so the engine re-reads
+	 * the real post-growth state on next access.
+	 */
+	@EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+	public void onStructureGrow(StructureGrowEvent event) {
+		for (BlockState state : event.getBlocks()) {
+			Block block = state.getBlock();
+			cache.invalidate(block.getWorld().getUID(),
+					BlockKey.of(block.getX(), block.getY(), block.getZ()));
+		}
+	}
+
+	/**
+	 * Falling blocks landing, endermen, and similar entity actions mutate
+	 * blocks without place/break events. When a block is removed (→ air) a gap
+	 * opens that neighbouring fluid must flow into; either way the cached
+	 * state for the cell is stale.
+	 */
+	@EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+	public void onEntityChangeBlock(EntityChangeBlockEvent event) {
+		if (event.getTo().isAir()) {
+			invalidateAndQueueNeighbours(event.getBlock());
+		} else {
+			Block block = event.getBlock();
+			cache.invalidate(block.getWorld().getUID(),
+					BlockKey.of(block.getX(), block.getY(), block.getZ()));
 		}
 	}
 
