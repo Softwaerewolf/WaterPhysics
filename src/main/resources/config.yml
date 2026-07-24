@@ -74,9 +74,11 @@ optimization:
   # Prevents queue explosion if an ocean chunk loads with thousands of sources.
   chunk-scan-max-blocks: 2000
 
-  # Biomes where water physics is completely disabled.
-  # Useful for skipping natural oceans, rivers, etc. that you don't want disturbed.
-  # Use lowercase biome keys (e.g. "ocean", "deep_ocean"). Empty list = all biomes active.
+  # Biomes where water is treated as an INFINITE source instead of being
+  # simulated: water there never drains, and tops up neighbouring air or
+  # partially filled water tiles to full when disturbed. Digging into an
+  # ocean floods the hole; the ocean itself never empties.
+  # Use lowercase biome keys (e.g. "ocean", "deep_ocean"). Empty list = all biomes finite.
   excluded-biomes:
     - ocean
     - deep_ocean

@@ -32,12 +32,20 @@ import static ru.deelter.waterphysics.cache.BlockStateCache.*;
  * Flow priority per tick:
  * <ol>
  *   <li>Gravity   — push as many units as fit straight down.</li>
- *   <li>Sideways  — donate one unit to each lower horizontal neighbour while
- *       the gradient is &gt;= 2 (flattens connected bodies; the {@code >= 2}
+ *   <li>Sideways  — only cells holding more than one unit search: a BFS across
+ *       the flat plane, limited to {@code units + 1} blocks away, looks for the
+ *       nearest cell water could fall from (a drain) or, failing that, the
+ *       nearest cell whose units differ by more than 1 (an equalization
+ *       target), and one unit crawls toward it.  The {@code > 1} difference
  *       guard prevents 1-unit oscillation and leaves single-layer puddles
- *       stable).</li>
+ *       stable.</li>
  * </ol>
  * Re-queueing of touched cells lets the body converge over successive ticks.
+ * <p>
+ * Water inside an excluded biome (oceans, rivers, …) is not simulated with the
+ * finite model — it acts as an <b>infinite source</b> that tops up the cell
+ * below and its horizontal neighbours whenever they hold air or partially
+ * filled water, without ever draining itself.
  */
 public final class FlowEngine extends BukkitRunnable {
 
@@ -49,10 +57,6 @@ public final class FlowEngine extends BukkitRunnable {
 	private static final int[] NX6 = {0, 1, 0, -1, 0, 0};
 	private static final int[] NY6 = {0, 0, 0, 0, 1, -1};
 	private static final int[] NZ6 = {-1, 0, 1, 0, 0, 0};
-
-	// Max cells visited when hunting for a downhill drain across a flat plane.
-	// Bounds cost regardless of body shape; large enough to reach a distant exit.
-	private static final int MAX_FLOW_NODES = 1024;
 
 	private final PluginConfig config;
 	private final BlockStateCache cache;
@@ -91,7 +95,7 @@ public final class FlowEngine extends BukkitRunnable {
 	private final Map<Long, Integer> lastEffectTick = new HashMap<>();
 	private int soundTick;
 
-	// Reused BFS scratch for findDrainDir — avoids per-call allocation.
+	// Reused BFS scratch for findFlowDir — avoids per-call allocation.
 	private final ArrayDeque<int[]> bfsQueue = new ArrayDeque<>();
 	private final HashSet<Long> bfsSeen = new HashSet<>(64);
 
@@ -160,7 +164,10 @@ public final class FlowEngine extends BukkitRunnable {
 				&& !proximity.isActive(world.getUID(), x, z)) return;
 		if (biomeExclusionEnabled) {
 			long bk = BlockKey.of(x >> 2, y >> 2, z >> 2);
-			if (biomeExcludedCache.computeIfAbsent(bk, k -> config.isBiomeExcluded(world.getBiome(x, y, z)))) return;
+			if (biomeExcludedCache.computeIfAbsent(bk, k -> config.isBiomeExcluded(world.getBiome(x, y, z)))) {
+				processInfiniteSource(world, x, y, z);
+				return;
+			}
 		}
 		// Pick the fluid for this block: water always, lava only if enabled.
 		byte selfType = getType(world, x, y, z);
@@ -227,12 +234,14 @@ public final class FlowEngine extends BukkitRunnable {
 			}
 		}
 
-		// (b) Still holding water and no adjacent drop: scan the flat plane for
-		//     the nearest cell water could fall from and crawl one unit toward
-		//     it.  Guarantees a body fully empties whenever ANY reachable lower
-		//     spot exists, instead of stranding films on a plateau.
+		// (b) Still holding water and no adjacent drop: scan the flat plane
+		//     (at most u + 1 blocks away — fuller cells push farther) for the
+		//     nearest cell water could fall from, or failing that the nearest
+		//     cell whose units differ from ours by more than 1, and crawl one
+		//     unit toward it.  Only cells with more than one unit search, so
+		//     single-layer puddles stay stable.
 		if (u > 1) {
-			int dir = findDrainDir(world, x, y, z);
+			int dir = findFlowDir(world, x, y, z, u);
 			if (dir >= 0) {
 				int nx = x + DX[dir];
 				int nz = z + DZ[dir];
@@ -240,19 +249,6 @@ public final class FlowEngine extends BukkitRunnable {
 				if (nu < u) {
 					addWaterFalling(world, nx, y, nz, 1);
 					u--;
-				}
-			} else {
-				// Truly enclosed basin → equalise to a flat puddle (stable at diff < 2).
-				for (int i = 0; i < 4 && u > 1; i++) {
-					int nx = x + DX[i];
-					int nz = z + DZ[i];
-					byte nt = getType(world, nx, y, nz);
-					if (nt != TYPE_AIR && nt != TYPE_PLANT && nt != curType) continue;
-					int nu = (nt == curType) ? unitsAt(world, nx, y, nz) : 0;
-					if (u - nu >= 2) {
-						addWaterFalling(world, nx, y, nz, 1);
-						u--;
-					}
 				}
 			}
 		}
@@ -273,6 +269,38 @@ public final class FlowEngine extends BukkitRunnable {
 			if (upY <= maxY(world) && getType(world, x, upY, z) == curType) {
 				queue.enqueue(world, x, upY, z);
 			}
+		}
+	}
+
+	/**
+	 * Water inside an excluded biome (oceans, rivers, …) is not simulated with
+	 * the finite model — it acts as an INFINITE source: each processing pass
+	 * tops up the cell below and the four horizontal neighbours to full
+	 * whenever they hold air or partially filled water, without ever draining
+	 * itself. Digging into an ocean therefore floods the hole and the ocean
+	 * never empties; refilled cells outside the biome become ordinary finite
+	 * water. Plants (kelp, seagrass, …) are left untouched — only air and
+	 * partial water are filled.
+	 */
+	private void processInfiniteSource(World world, int x, int y, int z) {
+		if (getType(world, x, y, z) != TYPE_WATER) return;
+		curType = TYPE_WATER;
+		curMat = Material.WATER;
+		curIsWater = true;
+
+		if (y - 1 >= minY(world)) {
+			fillIfPartial(world, x, y - 1, z);
+		}
+		for (int i = 0; i < 4; i++) {
+			fillIfPartial(world, x + DX[i], y, z + DZ[i]);
+		}
+	}
+
+	/** Top up one cell to a full source if it holds air or partial water. */
+	private void fillIfPartial(World world, int x, int y, int z) {
+		byte t = getType(world, x, y, z);
+		if (t == TYPE_AIR || (t == TYPE_WATER && unitsAt(world, x, y, z) < 8)) {
+			place(world, x, y, z, 8);
 		}
 	}
 
@@ -306,16 +334,23 @@ public final class FlowEngine extends BukkitRunnable {
 	}
 
 	/**
-	 * Breadth-first search across the flat plane at height {@code y} for the
-	 * nearest cell from which water could fall ({@link #canDescend}). Returns
-	 * the index (0-3 in DX/DZ) of the first step toward it, or -1 if no drop is
-	 * reachable within {@link #MAX_FLOW_NODES} cells.
+	 * Breadth-first search across the flat plane at height {@code y}, limited
+	 * to {@code u + 1} blocks away from the origin — a body of {@code u} units
+	 * reaches farther the fuller it is. Looks for the nearest cell from which
+	 * water could fall ({@link #canDescend}); if no drain is in range, falls
+	 * back to the nearest equalization target — a passable cell holding at
+	 * least 2 units fewer than {@code u} (air/plant counts as 0), so bodies
+	 * flow horizontally and level out whenever the difference exceeds 1.
+	 * Returns the index (0-3 in DX/DZ) of the first step toward the chosen
+	 * cell, or -1 if neither exists in range.
 	 * <p>
 	 * Traverses only passable, non-descending cells (water sitting on a solid
 	 * floor, or air over a solid floor) — a descending cell is the goal, not a
 	 * transit node. Diagonal-free 4-neighbour expansion, matching flow dirs.
 	 */
-	private int findDrainDir(World world, int x, int y, int z) {
+	private int findFlowDir(World world, int x, int y, int z, int u) {
+		int maxDist = u + 1;
+		int equalizeDir = -1;
 		bfsQueue.clear();
 		bfsSeen.clear();
 		bfsSeen.add(BlockKey.of(x, 0, z));
@@ -326,21 +361,24 @@ public final class FlowEngine extends BukkitRunnable {
 			if (!bfsSeen.add(BlockKey.of(nx, 0, nz))) continue;
 			if (!isFlowPassable(world, nx, y, nz)) continue;
 			if (canDescend(world, nx, y, nz)) return i;
-			bfsQueue.add(new int[]{nx, nz, i});
+			if (equalizeDir < 0 && u - unitsAt(world, nx, y, nz) >= 2) equalizeDir = i;
+			bfsQueue.add(new int[]{nx, nz, i, 1});
 		}
 
-		while (!bfsQueue.isEmpty() && bfsSeen.size() < MAX_FLOW_NODES) {
+		while (!bfsQueue.isEmpty()) {
 			int[] c = bfsQueue.poll();
+			if (c[3] >= maxDist) continue;
 			for (int i = 0; i < 4; i++) {
 				int nx = c[0] + DX[i];
 				int nz = c[1] + DZ[i];
 				if (!bfsSeen.add(BlockKey.of(nx, 0, nz))) continue;
 				if (!isFlowPassable(world, nx, y, nz)) continue;
 				if (canDescend(world, nx, y, nz)) return c[2];
-				bfsQueue.add(new int[]{nx, nz, c[2]});
+				if (equalizeDir < 0 && u - unitsAt(world, nx, y, nz) >= 2) equalizeDir = c[2];
+				bfsQueue.add(new int[]{nx, nz, c[2], c[3] + 1});
 			}
 		}
-		return -1;
+		return equalizeDir;
 	}
 
 	/**
@@ -362,7 +400,7 @@ public final class FlowEngine extends BukkitRunnable {
 				if (canDescend(world, nx, y, nz)) return false;  // adjacent drop
 			}
 		}
-		return findDrainDir(world, x, y, z) < 0; // no far drain either
+		return findFlowDir(world, x, y, z, u) < 0; // no far drain or equalize target either
 	}
 
 	/**

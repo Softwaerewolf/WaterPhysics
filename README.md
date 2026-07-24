@@ -28,11 +28,13 @@ Each processed water cell, per tick:
    (a lower floor), cascading down the column as a waterfall — never leaving
    a film hanging in mid-air.
 3. **Drain seeking** — if sitting on a flat plane, breadth-first search
-   (up to `MAX_FLOW_NODES = 1024` cells) for the nearest spot water could
-   fall from, and crawl one unit toward it. Guarantees a body fully empties
-   whenever *any* reachable lower spot exists.
-4. **Equalize** — in a fully enclosed basin, level out with neighbours,
-   stopping at a 1-unit gradient so flat puddles stay stable (no oscillation).
+   up to `units + 1` blocks away (fuller cells push farther) for the nearest
+   spot water could fall from, and crawl one unit toward it. Only cells
+   holding more than one unit search.
+4. **Equalize** — if no drain is in range, the same search picks the nearest
+   cell whose units differ by more than 1 (air counts as 0) and one unit
+   crawls toward it, so bodies flow horizontally and level out, stopping at a
+   1-unit gradient so flat puddles stay stable (no oscillation).
 5. **Puddle removal** — a tiny film that cannot move anywhere is evaporated
    (configurable).
 
@@ -200,7 +202,7 @@ optimization:
   cache-max-size: 100000                   # Max cached block states (LRU).
   chunk-rescan-on-load: true               # Re-queue water on chunk load.
   chunk-scan-max-blocks: 2000              # Max water blocks re-queued per rescan.
-  excluded-biomes:                         # Biomes with physics fully disabled.
+  excluded-biomes:                         # Biomes where water is an infinite source.
     - ocean
     - deep_ocean
     - river
@@ -303,6 +305,9 @@ A: Lower `cache-max-size` (e.g. 50k) or `cache-ttl-seconds` (e.g. 30).
   solid wall (two pools at equal surface with no path over the top within the
   drain-search range) will not equalize through the wall. Same-plane bodies and
   drops/ledges work fully.
+- **Bounded search range.** A cell holding `n` units searches at most `n + 1`
+  blocks away for a drain or equalization target, so a thin film far from any
+  edge stays put until fed by fuller neighbours.
 
 ---
 
